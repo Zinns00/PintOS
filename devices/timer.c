@@ -7,6 +7,7 @@
 #include "threads/io.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "list.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -16,7 +17,7 @@
 #if TIMER_FREQ > 1000
 #error TIMER_FREQ <= 1000 recommended
 #endif
-
+static struct list sleep_list;
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
@@ -37,7 +38,7 @@ timer_init (void) {
 	/* 8254 input frequency divided by TIMER_FREQ, rounded to
 	   nearest. */
 	uint16_t count = (1193180 + TIMER_FREQ / 2) / TIMER_FREQ;
-
+	list_init(&sleep_list);
 	outb (0x43, 0x34);    /* CW: counter 0, LSB then MSB, mode 2, binary. */
 	outb (0x40, count & 0xff);
 	outb (0x40, count >> 8);
@@ -86,15 +87,24 @@ int64_t
 timer_elapsed (int64_t then) {
 	return timer_ticks () - then;
 }
+bool compare_time(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
 
+    struct thread *t1 = list_entry(a, struct thread, elem);
+	struct thread *t2 = list_entry(b, struct thread, elem);
+	bool result = t1->wakeup_time < t2->wakeup_time;
+    return result;
+}
 /* Suspends execution for approximately TICKS timer ticks. */
 void
 timer_sleep (int64_t ticks) {
-	int64_t start = timer_ticks ();
-
-	ASSERT (intr_get_level () == INTR_ON);
-	while (timer_elapsed (start) < ticks)
-		thread_yield ();
+	int64_t wakeup_time = timer_ticks() + ticks;
+	
+	struct thread *t = thread_current();
+	enum intr_level old_level = intr_disable ();
+	t->wakeup_time = wakeup_time;
+	list_insert_ordered(&wakeup_time,&t->elem,compare_time,NULL);
+	thread_block();
+	intr_set_level (old_level);
 }
 
 /* Suspends execution for approximately MS milliseconds. */
@@ -127,6 +137,7 @@ timer_interrupt (struct intr_frame *args UNUSED) {
 	ticks++;
 	thread_tick ();
 }
+
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
